@@ -33,13 +33,7 @@ Public Sub ProcessDispatchInstructions()
     Set sourceWs = sourceWb.Worksheets(1) ' Assuming the data is on the first sheet
 
     Dim headerRow As Long
-    headerRow = FindHeaderRow(sourceWs)
-
-    If headerRow = 0 Then
-        MsgBox "Error: Could not find the header row in the selected file.", vbCritical
-        sourceWb.Close SaveChanges:=False
-        Exit Sub
-    End If
+    headerRow = 1 ' Assume the first row is always the header
 
     Dim columnMap As Object ' Dictionary
     Set columnMap = MapColumns(sourceWs, headerRow)
@@ -85,56 +79,6 @@ Public Sub ProcessDispatchInstructions()
 
     Application.ScreenUpdating = True
 End Sub
-
-Private Function FindHeaderRow(ws As Worksheet) As Long
-    ' Scans the top 20 rows to find the header row by checking for variants of all required fields.
-    Dim i As Long
-    Dim logicalFields As Object
-    Set logicalFields = CreateObject("Scripting.Dictionary")
-    logicalFields("NotificationDateTime") = Array("Notification Date & Time", "Notification Time", "Notification Date")
-    logicalFields("TargetTime") = Array("Target Date & Time", "Target Time")
-    logicalFields("TargetDemand") = Array("Target Demand", "Demand", "MW")
-    logicalFields("ActualComplianceTime") = Array("Actual Date & Time", "Actual Compliance", "Actual Time")
-    logicalFields("DemandType") = Array("Demand Type", "Instruction Type", "Load Type")
-
-    For i = 1 To 20 ' Scan top 20 rows
-        Dim foundFieldsCount As Integer
-        foundFieldsCount = 0
-
-        Dim key As Variant
-        For Each key In logicalFields.Keys
-            Dim variants As Variant
-            variants = logicalFields(key)
-
-            Dim variantName As Variant
-            Dim foundVariant As Boolean
-            foundVariant = False
-
-            For Each variantName In variants
-                Dim cell As Range
-                For Each cell In ws.Rows(i).Cells
-                    If LCase(Trim(Replace(cell.Value, vbLf, " "))) = LCase(variantName) Then
-                        foundVariant = True
-                        Exit For
-                    End If
-                Next cell
-                If foundVariant Then Exit For
-            Next variantName
-
-            If foundVariant Then
-                foundFieldsCount = foundFieldsCount + 1
-            End If
-        Next key
-
-        ' If all 5 logical fields have at least one variant present, this is the header row.
-        If foundFieldsCount = logicalFields.Count Then
-            FindHeaderRow = i
-            Exit Function
-        End If
-    Next i
-
-    FindHeaderRow = 0 ' Header row not found
-End Function
 
 Private Function MapColumns(ws As Worksheet, headerRow As Long) As Object
     ' Maps the required column headers to their column index
