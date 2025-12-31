@@ -2,174 +2,161 @@ Attribute VB_Name = "Despatch_Instruction_Comments"
 Option Explicit
 
 Public Sub ProcessDispatchInstructions()
-    ' Suppress screen updating to speed up macro execution
+    Dim priorScreenUpdating As Boolean
+    Dim priorDisplayAlerts As Boolean
+    Dim priorEnableEvents As Boolean
+
+    priorScreenUpdating = Application.ScreenUpdating
+    priorDisplayAlerts = Application.DisplayAlerts
+    priorEnableEvents = Application.EnableEvents
+
     Application.ScreenUpdating = False
+    Application.EnableEvents = False
 
-    ' Prompt user to select the Dispatch Instruction Report
+    On Error GoTo CleanFail
+
     Dim sourceFilePath As Variant
-    sourceFilePath = Application.GetOpenFilename( _
-        FileFilter:="Excel Files (*.xls), *.xls", _
-        Title:="Please select the Dispatch Instruction Report file", _
-        MultiSelect:=False)
-
-    ' Check if the user cancelled the dialog
+    sourceFilePath = GetSourceFilePath()
     If sourceFilePath = False Then
-        MsgBox "Operation cancelled by the user.", vbInformation
-        Exit Sub
+        GoTo CleanExit
     End If
 
-    ' Suppress alerts to prevent the file format mismatch warning
     Application.DisplayAlerts = False
 
-    ' Open the selected workbook in read-only mode
     Dim sourceWb As Workbook
-    Set sourceWb = Application.Workbooks.Open(sourceFilePath, ReadOnly:=True)
+    Set sourceWb = Application.Workbooks.Open(Filename:=sourceFilePath, ReadOnly:=True)
 
-    ' Re-enable alerts now that the file is open
-    Application.DisplayAlerts = True
+    Application.DisplayAlerts = priorDisplayAlerts
 
-    ' --- Header Detection and Column Mapping ---
     Dim sourceWs As Worksheet
-    Set sourceWs = sourceWb.Worksheets(1) ' Assuming the data is on the first sheet
+    Set sourceWs = sourceWb.Worksheets(1)
 
-    Dim headerRow As Long
-    headerRow = FindHeaderRow(sourceWs)
-
-    If headerRow = 0 Then
-        MsgBox "Error: Could not find the header row in the selected file.", vbCritical
-        sourceWb.Close SaveChanges:=False
-        Exit Sub
-    End If
-
-    Dim columnMap As Object ' Dictionary
-    Set columnMap = MapColumns(sourceWs, headerRow)
-
+    Dim columnMap As Object
+    Set columnMap = MapColumns(sourceWs)
     If columnMap Is Nothing Then
-        ' The MapColumns function will have already shown a specific error message.
-        sourceWb.Close SaveChanges:=False
-        Exit Sub
+        GoTo CleanExit
     End If
 
-    ' --- Data Processing and Validation ---
+    Dim dateMap As Object
+    Set dateMap = CreateObject("Scripting.Dictionary")
+
     Dim dispatchData As Collection
-    Set dispatchData = ProcessData(sourceWs, columnMap, headerRow)
+    Set dispatchData = CollectDispatchData(sourceWs, columnMap, dateMap)
 
-    If dispatchData.Count = 0 Then
-        MsgBox "No valid dispatch instructions found matching the criteria.", vbInformation
-        ' Note: The plan is to create an empty report, so we don't exit here.
-    Else
-        MsgBox dispatchData.Count & " valid dispatch instructions were processed.", vbInformation
-    End If
-
-    ' --- Output Workbook Generation ---
     Dim outputWb As Workbook
     Set outputWb = Application.Workbooks.Add
+
     Dim outputWs As Worksheet
     Set outputWs = outputWb.Worksheets(1)
 
-    GenerateTimeline outputWs, dispatchData
+    Dim timelineMap As Object
+    Set timelineMap = GenerateTimeline(outputWs, dateMap)
 
-    ' --- Remark Construction and Placement ---
-    PlaceRemarksAndFormat outputWs, dispatchData
+    Dim remarksWritten As Long
+    remarksWritten = PlaceRemarksAndFormat(outputWs, dispatchData, timelineMap)
 
-    ' --- Finalization ---
     outputWs.Columns.AutoFit
     outputWs.Rows.AutoFit
 
-    MsgBox "Dispatch instruction report has been successfully generated.", vbInformation
+    If remarksWritten = 0 Then
+        MsgBox "No dispatch instructions matched the filtering criteria.", vbInformation
+    Else
+        MsgBox "Dispatch instruction report has been successfully generated.", vbInformation
+    End If
 
+CleanExit:
+    On Error Resume Next
+    If Not sourceWb Is Nothing Then
+        sourceWb.Close SaveChanges:=False
+    End If
 
-    ' Clean up
-    sourceWb.Close SaveChanges:=False
-    Set sourceWb = Nothing
+    Application.DisplayAlerts = priorDisplayAlerts
+    Application.ScreenUpdating = priorScreenUpdating
+    Application.EnableEvents = priorEnableEvents
+    On Error GoTo 0
+    Exit Sub
 
-    Application.ScreenUpdating = True
+CleanFail:
+    MsgBox "An unexpected error occurred: " & Err.Description, vbCritical
+    Resume CleanExit
 End Sub
 
-Private Function FindHeaderRow(ws As Worksheet) As Long
-    ' Scans the top 20 rows to find the header row by checking for variants of all required fields.
-    Dim i As Long
-    Dim logicalFields As Object
-    Set logicalFields = CreateObject("Scripting.Dictionary")
-    logicalFields("NotificationDateTime") = Array("Notification Date & Time", "Notification Time", "Notification Date")
-    logicalFields("TargetTime") = Array("Target Date & Time", "Target Time")
-    logicalFields("TargetDemand") = Array("Target Demand", "Demand", "MW")
-    logicalFields("ActualComplianceTime") = Array("Actual Date & Time", "Actual Compliance", "Actual Time")
-    logicalFields("DemandType") = Array("Demand Type", "Instruction Type", "Load Type")
+Private Function GetSourceFilePath() As Variant
+    Dim dialog As FileDialog
+    Set dialog = Application.FileDialog(msoFileDialogFilePicker)
 
-    For i = 1 To 20 ' Scan top 20 rows
-        Dim foundFieldsCount As Integer
-        foundFieldsCount = 0
-
-        Dim key As Variant
-        For Each key In logicalFields.Keys
-            Dim variants As Variant
-            variants = logicalFields(key)
-
-            Dim variantName As Variant
-            Dim foundVariant As Boolean
-            foundVariant = False
-
-            For Each variantName In variants
-                Dim cell As Range
-                For Each cell In ws.Rows(i).Cells
-                    If LCase(Trim(Replace(cell.Value, vbLf, " "))) = LCase(variantName) Then
-                        foundVariant = True
-                        Exit For
-                    End If
-                Next cell
-                If foundVariant Then Exit For
-            Next variantName
-
-            If foundVariant Then
-                foundFieldsCount = foundFieldsCount + 1
-            End If
-        Next key
-
-        ' If all 5 logical fields have at least one variant present, this is the header row.
-        If foundFieldsCount = logicalFields.Count Then
-            FindHeaderRow = i
+    With dialog
+        .Title = "Please select the Dispatch Instruction Report file"
+        .AllowMultiSelect = False
+        .Filters.Clear
+        .Filters.Add "Excel Files", "*.xls;*.xlsx;*.xlsm"
+        If .Show <> -1 Then
+            GetSourceFilePath = False
             Exit Function
         End If
-    Next i
-
-    FindHeaderRow = 0 ' Header row not found
+        GetSourceFilePath = .SelectedItems(1)
+    End With
 End Function
 
-Private Function MapColumns(ws As Worksheet, headerRow As Long) As Object
-    ' Maps the required column headers to their column index
+Private Function NormalizeHeader(ByVal value As Variant) As String
+    Dim normalized As String
+    normalized = CStr(value)
+    normalized = Replace(normalized, vbCr, " ")
+    normalized = Replace(normalized, vbLf, " ")
+    normalized = LCase(Trim(normalized))
+
+    Do While InStr(normalized, "  ") > 0
+        normalized = Replace(normalized, "  ", " ")
+    Loop
+
+    NormalizeHeader = normalized
+End Function
+
+Private Function MapColumns(ws As Worksheet) As Object
     Dim columnMap As Object
     Set columnMap = CreateObject("Scripting.Dictionary")
 
     Dim logicalFields As Object
     Set logicalFields = CreateObject("Scripting.Dictionary")
-    logicalFields("NotificationDateTime") = Array("Notification Date & Time", "Notification Time", "Notification Date")
-    logicalFields("TargetTime") = Array("Target Date & Time", "Target Time")
-    logicalFields("TargetDemand") = Array("Target Demand", "Demand", "MW")
-    logicalFields("ActualComplianceTime") = Array("Actual Date & Time", "Actual Compliance", "Actual Time")
-    logicalFields("DemandType") = Array("Demand Type", "Instruction Type", "Load Type")
+    logicalFields("NotificationDateTime") = Array("notification date & time", "notification time", "notification date")
+    logicalFields("TargetTime") = Array("target date & time", "target time")
+    logicalFields("TargetDemand") = Array("target demand", "demand", "mw")
+    logicalFields("ActualComplianceTime") = Array("actual date & time", "actual compliance", "actual time")
+    logicalFields("DemandType") = Array("demand type", "instruction type", "load type")
 
+    Dim headerRow As Long
+    headerRow = 1
+
+    Dim lastCol As Long
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
+
+    Dim col As Long
+    Dim headerText As String
     Dim key As Variant
-    Dim variants As Variant
     Dim variantName As Variant
-    Dim headerCell As Range
-    Dim found As Boolean
 
     For Each key In logicalFields.Keys
-        found = False
-        variants = logicalFields(key)
-        For Each variantName In variants
-            For Each headerCell In ws.Rows(headerRow).Cells
-                If LCase(Trim(Replace(headerCell.Value, vbLf, " "))) = LCase(variantName) Then
-                    columnMap(key) = headerCell.Column
-                    found = True
-                    Exit For
-                End If
-            Next headerCell
-            If found Then Exit For
-        Next variantName
+        columnMap(key) = 0
+    Next key
 
-        If Not found Then
+    For col = 1 To lastCol
+        headerText = NormalizeHeader(ws.Cells(headerRow, col).Value)
+        If Len(headerText) > 0 Then
+            For Each key In logicalFields.Keys
+                If columnMap(key) = 0 Then
+                    For Each variantName In logicalFields(key)
+                        If headerText = variantName Then
+                            columnMap(key) = col
+                            Exit For
+                        End If
+                    Next variantName
+                End If
+            Next key
+        End If
+    Next col
+
+    For Each key In logicalFields.Keys
+        If columnMap(key) = 0 Then
             MsgBox "Error: Required column for '" & key & "' could not be found.", vbCritical
             Set MapColumns = Nothing
             Exit Function
@@ -179,164 +166,181 @@ Private Function MapColumns(ws As Worksheet, headerRow As Long) As Object
     Set MapColumns = columnMap
 End Function
 
-Private Function ProcessData(ws As Worksheet, columnMap As Object, headerRow As Long) As Collection
-    Set ProcessData = New Collection
+Private Function TryParseDateTime(ByVal value As Variant, ByRef result As Date) As Boolean
+    Dim textValue As String
+    textValue = Trim(CStr(value))
+    If Len(textValue) = 0 Then Exit Function
+
+    textValue = Replace(textValue, vbCr, " ")
+    textValue = Replace(textValue, vbLf, " ")
+
+    If IsDate(textValue) Then
+        result = CDate(textValue)
+        TryParseDateTime = True
+        Exit Function
+    End If
+
+    Dim parts As Variant
+    parts = Split(textValue, " ")
+    If UBound(parts) >= 1 Then
+        If IsDate(parts(0)) And IsDate(parts(1)) Then
+            result = DateValue(parts(0)) + TimeValue(parts(1))
+            TryParseDateTime = True
+        End If
+    End If
+End Function
+
+Private Function TryParseDemand(ByVal value As Variant, ByRef result As Double) As Boolean
+    Dim textValue As String
+    textValue = Trim(CStr(value))
+    If Len(textValue) = 0 Then Exit Function
+
+    textValue = Replace(textValue, ",", "")
+    textValue = Replace(textValue, " ", "")
+
+    If IsNumeric(textValue) Then
+        result = CDbl(textValue)
+        TryParseDemand = True
+    End If
+End Function
+
+Private Function CollectDispatchData(ws As Worksheet, columnMap As Object, dateMap As Object) As Collection
+    Dim results As New Collection
 
     Dim lastRow As Long
     lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
 
-    Dim i As Long
-    For i = headerRow + 1 To lastRow
+    Dim rowIndex As Long
+    For rowIndex = 2 To lastRow
         Dim demandType As String
-        demandType = ws.Cells(i, columnMap("DemandType")).Value
+        demandType = LCase(Trim(CStr(ws.Cells(rowIndex, columnMap("DemandType")).Value)))
 
-        If InStr(1, demandType, "Increase Load", vbTextCompare) > 0 Or InStr(1, demandType, "Decrease Load", vbTextCompare) > 0 Then
-            ' Validation Checks
-            If Not IsDate(ws.Cells(i, columnMap("NotificationDateTime")).Value) Then GoTo SkipRow
-            If Not IsDate(ws.Cells(i, columnMap("TargetTime")).Value) Then GoTo SkipRow
-            If Not IsDate(ws.Cells(i, columnMap("ActualComplianceTime")).Value) Then GoTo SkipRow
-            If Not IsNumeric(ws.Cells(i, columnMap("TargetDemand")).Value) Then GoTo SkipRow
-
-            ' If all checks pass, add to collection
-            Dim dataRow As Object
-            Set dataRow = CreateObject("Scripting.Dictionary")
-            dataRow("NotificationDateTime") = CDate(ws.Cells(i, columnMap("NotificationDateTime")).Value)
-            dataRow("TargetTime") = CDate(ws.Cells(i, columnMap("TargetTime")).Value)
-            dataRow("ActualComplianceTime") = CDate(ws.Cells(i, columnMap("ActualComplianceTime")).Value)
-            dataRow("TargetDemand") = CDbl(ws.Cells(i, columnMap("TargetDemand")).Value)
-
-            ProcessData.Add dataRow
+        If InStr(1, demandType, "increase", vbTextCompare) = 0 And InStr(1, demandType, "decrease", vbTextCompare) = 0 Then
+            GoTo NextRow
         End If
-SkipRow:
-    Next i
+
+        Dim notificationDateTime As Date
+        Dim targetTime As Date
+        Dim actualComplianceTime As Date
+        Dim targetDemand As Double
+
+        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("NotificationDateTime")).Value, notificationDateTime) Then GoTo NextRow
+
+        dateMap(Format(Int(notificationDateTime), "yyyy-mm-dd")) = True
+
+        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("TargetTime")).Value, targetTime) Then GoTo NextRow
+        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("ActualComplianceTime")).Value, actualComplianceTime) Then GoTo NextRow
+        If Not TryParseDemand(ws.Cells(rowIndex, columnMap("TargetDemand")).Value, targetDemand) Then GoTo NextRow
+
+        Dim dataRow As Object
+        Set dataRow = CreateObject("Scripting.Dictionary")
+        dataRow("NotificationDateTime") = notificationDateTime
+        dataRow("TargetTime") = targetTime
+        dataRow("ActualComplianceTime") = actualComplianceTime
+        dataRow("TargetDemand") = targetDemand
+
+        results.Add dataRow
+
+NextRow:
+    Next rowIndex
+
+    Set CollectDispatchData = results
 End Function
 
-Private Sub GenerateTimeline(ws As Worksheet, data As Collection)
-    ws.Columns("A").NumberFormat = "@" ' Text format for the timeline
-    ws.Columns("B").NumberFormat = "@" ' Text format for remarks
+Private Function GenerateTimeline(ws As Worksheet, dateMap As Object) As Object
+    Dim dateRowMap As Object
+    Set dateRowMap = CreateObject("Scripting.Dictionary")
 
-    ws.Cells(1, 1).Value = "Date / Time"
-    ws.Cells(1, 1).Font.Bold = True
-    ws.Cells(1, 2).Value = "Dispatch Remarks"
-    ws.Cells(1, 2).Font.Bold = True
+    ws.Columns("A").NumberFormat = "@"
+    ws.Columns("B").NumberFormat = "@"
 
-    If data.Count = 0 Then
-        ws.Cells(2, 1).Value = "No data matching filtering criteria."
-        Exit Sub
+    If dateMap.Count = 0 Then
+        Set GenerateTimeline = dateRowMap
+        Exit Function
     End If
-
-    ' Get unique dates
-    Dim uniqueDates As Object
-    Set uniqueDates = CreateObject("Scripting.Dictionary")
-    Dim item As Object
-    For Each item In data
-        uniqueDates(Int(item("NotificationDateTime"))) = 1
-    Next item
 
     Dim sortedDates As Object
     Set sortedDates = CreateObject("System.Collections.ArrayList")
+
     Dim d As Variant
-    For Each d In uniqueDates.Keys
-        sortedDates.Add d
+    For Each d In dateMap.Keys
+        sortedDates.Add DateValue(d)
     Next d
     sortedDates.Sort
 
     Dim currentRow As Long
-    currentRow = 2
+    currentRow = 1
 
     For Each d In sortedDates
-        ' Date Header
         ws.Cells(currentRow, 1).Value = Format(d, "dd-mmm-yyyy")
-        With ws.Cells(currentRow, 1).Font
-            .Bold = True
-            .Color = vbBlack
+        With ws.Cells(currentRow, 1)
+            .Font.Bold = True
+            .Interior.Color = RGB(255, 255, 200)
         End With
-        ws.Cells(currentRow, 1).Interior.Color = RGB(255, 255, 200)
+
+        dateRowMap(Format(d, "yyyy-mm-dd")) = currentRow
         currentRow = currentRow + 1
 
-        ' Hourly Slots
         Dim h As Long
         For h = 0 To 23
-            Dim endTime As String
+            Dim startLabel As String
+            Dim endLabel As String
+            startLabel = Format(TimeSerial(h, 0, 0), "hh:mm")
             If h = 23 Then
-                endTime = "24:00"
+                endLabel = "24:00"
             Else
-                endTime = Format(TimeSerial(h + 1, 0, 0), "hh:mm")
+                endLabel = Format(TimeSerial(h + 1, 0, 0), "hh:mm")
             End If
-            ws.Cells(currentRow + h, 1).Value = Format(TimeSerial(h, 0, 0), "hh:mm") & " – " & endTime
+            ws.Cells(currentRow, 1).Value = startLabel & " – " & endLabel
+            currentRow = currentRow + 1
         Next h
-        currentRow = currentRow + 24
     Next d
-End Sub
 
-Private Sub PlaceRemarksAndFormat(ws As Worksheet, data As Collection)
-    If data.Count = 0 Then Exit Sub
+    Set GenerateTimeline = dateRowMap
+End Function
+
+Private Function PlaceRemarksAndFormat(ws As Worksheet, data As Collection, dateRowMap As Object) As Long
+    Dim remarksWritten As Long
+    remarksWritten = 0
 
     Dim item As Object
     For Each item In data
+        Dim dateKey As String
+        dateKey = Format(Int(item("NotificationDateTime")), "yyyy-mm-dd")
+
+        If Not dateRowMap.Exists(dateKey) Then
+            GoTo NextItem
+        End If
+
+        Dim hourIndex As Long
+        hourIndex = Hour(item("NotificationDateTime"))
+
+        Dim targetRow As Long
+        targetRow = dateRowMap(dateKey) + 1 + hourIndex
+
+        Dim targetCell As Range
+        Set targetCell = ws.Cells(targetRow, 2)
+
         Dim remark As String
         remark = BuildRemark(item)
 
-        Dim targetRow As Long
-        targetRow = FindRowForRemark(ws, item("NotificationDateTime"))
-
-        If targetRow > 0 Then
-            Dim targetCell As Range
-            Set targetCell = ws.Cells(targetRow, 2)
-
-            Dim startPos As Long
-            If Len(targetCell.Value) > 0 Then
-                ' Position after the existing text and the newline character
-                startPos = Len(targetCell.Value) + 2
-                targetCell.Value = targetCell.Value & vbLf & remark
-            Else
-                startPos = 1
-                targetCell.Value = remark
-            End If
-
-            ' --- Apply Formatting to the newly added text block ---
-
-            ' Rule 1: Target Demand > 320 MW
-            If item("TargetDemand") > 320 Then
-                Dim fcblPos As Long
-                fcblPos = InStr(startPos, targetCell.Value, "FCBL")
-                If fcblPos > 0 Then
-                    With targetCell.Characters(fcblPos, 4).Font
-                        .Bold = True
-                        .Color = vbBlue
-                    End With
-                End If
-            End If
-
-            ' Rule 2: Compliance Delay
-            If item("ActualComplianceTime") > item("TargetTime") Then
-                Dim actualLineStart As Long
-                actualLineStart = InStr(startPos, targetCell.Value, "Actual Compliance:")
-
-                If actualLineStart > 0 Then
-                    ' Find the end of the line for the current remark
-                    Dim actualLineEnd As Long
-                    actualLineEnd = InStr(actualLineStart, targetCell.Value, vbLf)
-
-                    Dim lineLength As Long
-                    If actualLineEnd > 0 And actualLineEnd > actualLineStart Then
-                        lineLength = actualLineEnd - actualLineStart
-                    Else
-                        ' If no newline, it's the last line in the cell
-                        lineLength = Len(targetCell.Value) - actualLineStart + 1
-                    End If
-
-                    If lineLength > 0 Then
-                        With targetCell.Characters(actualLineStart, lineLength).Font
-                            .Bold = True
-                            .Color = vbRed
-                        End With
-                    End If
-                End If
-            End If
+        Dim remarkStart As Long
+        If Len(targetCell.Value) > 0 Then
+            targetCell.Value = targetCell.Value & vbLf & remark
+            remarkStart = Len(targetCell.Value) - Len(remark) + 1
+        Else
+            targetCell.Value = remark
+            remarkStart = 1
         End If
+
+        ApplyRemarkFormatting targetCell, item, remark, remarkStart
+        remarksWritten = remarksWritten + 1
+
+NextItem:
     Next item
-End Sub
+
+    PlaceRemarksAndFormat = remarksWritten
+End Function
 
 Private Function BuildRemark(item As Object) As String
     Dim notifTime As String
@@ -344,7 +348,7 @@ Private Function BuildRemark(item As Object) As String
 
     Dim targetTime As String
     If Int(item("TargetTime")) <> Int(item("NotificationDateTime")) Then
-        targetTime = "Target Time: " & Format(item("TargetTime"), "hh:mm (dd.mmm.yy)")
+        targetTime = "Target Time: " & Format(item("TargetTime"), "hh:mm") & " (" & Format(item("TargetTime"), "dd.mmm.yy") & ")"
     Else
         targetTime = "Target Time: " & Format(item("TargetTime"), "hh:mm")
     End If
@@ -353,12 +357,12 @@ Private Function BuildRemark(item As Object) As String
     If item("TargetDemand") > 320 Then
         targetDemand = "Target Demand: FCBL"
     Else
-        targetDemand = "Target Demand: " & Format(item("TargetDemand"), "#,##0.00")
+        targetDemand = "Target Demand: " & Format(item("TargetDemand"), "0.00")
     End If
 
     Dim actualTime As String
     If Int(item("ActualComplianceTime")) <> Int(item("NotificationDateTime")) Then
-        actualTime = "Actual Compliance: " & Format(item("ActualComplianceTime"), "hh:mm (dd.mmm.yy)")
+        actualTime = "Actual Compliance: " & Format(item("ActualComplianceTime"), "hh:mm") & " (" & Format(item("ActualComplianceTime"), "dd.mmm.yy") & ")"
     Else
         actualTime = "Actual Compliance: " & Format(item("ActualComplianceTime"), "hh:mm")
     End If
@@ -366,18 +370,35 @@ Private Function BuildRemark(item As Object) As String
     BuildRemark = notifTime & vbLf & targetTime & "; " & targetDemand & vbLf & actualTime
 End Function
 
-Private Function FindRowForRemark(ws As Worksheet, notificationTime As Date) As Long
-    Dim searchDate As String
-    searchDate = Format(notificationTime, "dd-mmm-yyyy")
-
-    Dim dateCell As Range
-    Set dateCell = ws.Columns(1).Find(What:=searchDate, LookIn:=xlValues, LookAt:=xlWhole)
-
-    If Not dateCell Is Nothing Then
-        Dim hourSlot As Integer
-        hourSlot = Hour(notificationTime)
-        FindRowForRemark = dateCell.Row + 1 + hourSlot
-    Else
-        FindRowForRemark = 0
+Private Sub ApplyRemarkFormatting(targetCell As Range, item As Object, remark As String, remarkStart As Long)
+    Dim localFcblPos As Long
+    localFcblPos = InStr(1, remark, "FCBL", vbTextCompare)
+    If localFcblPos > 0 Then
+        With targetCell.Characters(remarkStart + localFcblPos - 1, 4).Font
+            .Bold = True
+            .Color = vbBlue
+        End With
     End If
-End Function
+
+    If item("ActualComplianceTime") > item("TargetTime") Then
+        Dim localActualStart As Long
+        localActualStart = InStr(1, remark, "Actual Compliance:", vbTextCompare)
+        If localActualStart > 0 Then
+            Dim localActualEnd As Long
+            localActualEnd = InStr(localActualStart, remark, vbLf)
+            Dim lineLength As Long
+            If localActualEnd > 0 Then
+                lineLength = localActualEnd - localActualStart
+            Else
+                lineLength = Len(remark) - localActualStart + 1
+            End If
+
+            If lineLength > 0 Then
+                With targetCell.Characters(remarkStart + localActualStart - 1, lineLength).Font
+                    .Bold = True
+                    .Color = vbRed
+                End With
+            End If
+        End If
+    End If
+End Sub
