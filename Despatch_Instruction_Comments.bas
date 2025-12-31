@@ -48,6 +48,7 @@ Public Sub ProcessDispatchInstructions()
 
     Dim outputWs As Worksheet
     Set outputWs = outputWb.Worksheets(1)
+    outputWs.Name = "Dispatch Timeline"
 
     Dim timelineMap As Object
     Set timelineMap = GenerateTimeline(outputWs, dateMap)
@@ -161,7 +162,18 @@ Private Function MapColumns(ws As Worksheet) As Object
             Set MapColumns = Nothing
             Exit Function
         End If
-    Next key
+    Next headerName
+
+    If missingHeaders.Count > 0 Then
+        Dim message As String
+        message = "Error: Required column(s) missing from row 1:" & vbLf
+        For Each headerName In missingHeaders
+            message = message & "- " & headerName & vbLf
+        Next headerName
+        MsgBox message, vbCritical
+        Set MapColumns = Nothing
+        Exit Function
+    End If
 
     Set MapColumns = columnMap
 End Function
@@ -271,6 +283,7 @@ Private Function GenerateTimeline(ws As Worksheet, dateMap As Object) As Object
     Dim currentRow As Long
     currentRow = 1
 
+    Dim d As Variant
     For Each d In sortedDates
         ws.Cells(currentRow, 1).Value = Format(d, "dd-mmm-yyyy")
         With ws.Cells(currentRow, 1)
