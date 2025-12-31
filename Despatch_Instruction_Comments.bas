@@ -99,59 +99,68 @@ Private Function GetSourceFilePath() As Variant
     End With
 End Function
 
-Private Function NormalizeText(ByVal value As Variant) As String
+Private Function NormalizeHeader(ByVal value As Variant) As String
     Dim normalized As String
     normalized = CStr(value)
     normalized = Replace(normalized, vbCr, " ")
     normalized = Replace(normalized, vbLf, " ")
-    normalized = Trim(normalized)
+    normalized = LCase(Trim(normalized))
 
     Do While InStr(normalized, "  ") > 0
         normalized = Replace(normalized, "  ", " ")
     Loop
 
-    NormalizeText = normalized
+    NormalizeHeader = normalized
 End Function
 
 Private Function MapColumns(ws As Worksheet) As Object
     Dim columnMap As Object
     Set columnMap = CreateObject("Scripting.Dictionary")
 
-    Dim requiredHeaders As Variant
-    requiredHeaders = Array(
-        "Demand Type", _
-        "Notification Date & Time", _
-        "Target Date & Time", _
-        "Target Demand (MW)", _
-        "Actual Compliance Time", _
-        "Plant Comments")
+    Dim logicalFields As Object
+    Set logicalFields = CreateObject("Scripting.Dictionary")
+    logicalFields("NotificationDateTime") = Array("notification date & time", "notification time", "notification date")
+    logicalFields("TargetTime") = Array("target date & time", "target time")
+    logicalFields("TargetDemand") = Array("target demand", "demand", "mw")
+    logicalFields("ActualComplianceTime") = Array("actual date & time", "actual compliance", "actual time")
+    logicalFields("DemandType") = Array("demand type", "instruction type", "load type")
 
-    Dim headerIndex As Object
-    Set headerIndex = CreateObject("Scripting.Dictionary")
+    Dim headerRow As Long
+    headerRow = 1
 
     Dim lastCol As Long
-    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    lastCol = ws.Cells(headerRow, ws.Columns.Count).End(xlToLeft).Column
 
     Dim col As Long
+    Dim headerText As String
+    Dim key As Variant
+    Dim variantName As Variant
+
+    For Each key In logicalFields.Keys
+        columnMap(key) = 0
+    Next key
+
     For col = 1 To lastCol
-        Dim headerValue As String
-        headerValue = NormalizeText(ws.Cells(1, col).Value)
-        If Len(headerValue) > 0 Then
-            headerIndex(LCase(headerValue)) = col
+        headerText = NormalizeHeader(ws.Cells(headerRow, col).Value)
+        If Len(headerText) > 0 Then
+            For Each key In logicalFields.Keys
+                If columnMap(key) = 0 Then
+                    For Each variantName In logicalFields(key)
+                        If headerText = variantName Then
+                            columnMap(key) = col
+                            Exit For
+                        End If
+                    Next variantName
+                End If
+            Next key
         End If
     Next col
 
-    Dim missingHeaders As Collection
-    Set missingHeaders = New Collection
-
-    Dim headerName As Variant
-    For Each headerName In requiredHeaders
-        Dim key As String
-        key = LCase(headerName)
-        If headerIndex.Exists(key) Then
-            columnMap(headerName) = headerIndex(key)
-        Else
-            missingHeaders.Add headerName
+    For Each key In logicalFields.Keys
+        If columnMap(key) = 0 Then
+            MsgBox "Error: Required column for '" & key & "' could not be found.", vbCritical
+            Set MapColumns = Nothing
+            Exit Function
         End If
     Next headerName
 
@@ -199,18 +208,12 @@ Private Function TryParseDemand(ByVal value As Variant, ByRef result As Double) 
     If Len(textValue) = 0 Then Exit Function
 
     textValue = Replace(textValue, ",", "")
+    textValue = Replace(textValue, " ", "")
 
     If IsNumeric(textValue) Then
         result = CDbl(textValue)
         TryParseDemand = True
     End If
-End Function
-
-Private Function NormalizeDemandType(ByVal value As Variant) As String
-    Dim normalized As String
-    normalized = NormalizeText(value)
-    normalized = LCase(normalized)
-    NormalizeDemandType = normalized
 End Function
 
 Private Function CollectDispatchData(ws As Worksheet, columnMap As Object, dateMap As Object) As Collection
@@ -222,24 +225,24 @@ Private Function CollectDispatchData(ws As Worksheet, columnMap As Object, dateM
     Dim rowIndex As Long
     For rowIndex = 2 To lastRow
         Dim demandType As String
-        demandType = NormalizeDemandType(ws.Cells(rowIndex, columnMap("Demand Type")).Value)
+        demandType = LCase(Trim(CStr(ws.Cells(rowIndex, columnMap("DemandType")).Value)))
 
-        If demandType <> "increase load" And demandType <> "decrease load" Then
+        If InStr(1, demandType, "increase", vbTextCompare) = 0 And InStr(1, demandType, "decrease", vbTextCompare) = 0 Then
             GoTo NextRow
         End If
 
         Dim notificationDateTime As Date
-        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("Notification Date & Time")).Value, notificationDateTime) Then GoTo NextRow
-
-        dateMap(Format(Int(notificationDateTime), "yyyy-mm-dd")) = True
-
         Dim targetTime As Date
         Dim actualComplianceTime As Date
         Dim targetDemand As Double
 
-        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("Target Date & Time")).Value, targetTime) Then GoTo NextRow
-        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("Actual Compliance Time")).Value, actualComplianceTime) Then GoTo NextRow
-        If Not TryParseDemand(ws.Cells(rowIndex, columnMap("Target Demand (MW)")).Value, targetDemand) Then GoTo NextRow
+        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("NotificationDateTime")).Value, notificationDateTime) Then GoTo NextRow
+
+        dateMap(Format(Int(notificationDateTime), "yyyy-mm-dd")) = True
+
+        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("TargetTime")).Value, targetTime) Then GoTo NextRow
+        If Not TryParseDateTime(ws.Cells(rowIndex, columnMap("ActualComplianceTime")).Value, actualComplianceTime) Then GoTo NextRow
+        If Not TryParseDemand(ws.Cells(rowIndex, columnMap("TargetDemand")).Value, targetDemand) Then GoTo NextRow
 
         Dim dataRow As Object
         Set dataRow = CreateObject("Scripting.Dictionary")
@@ -257,24 +260,24 @@ NextRow:
 End Function
 
 Private Function GenerateTimeline(ws As Worksheet, dateMap As Object) As Object
-    Dim timelineMap As Object
-    Set timelineMap = CreateObject("Scripting.Dictionary")
+    Dim dateRowMap As Object
+    Set dateRowMap = CreateObject("Scripting.Dictionary")
 
     ws.Columns("A").NumberFormat = "@"
     ws.Columns("B").NumberFormat = "@"
 
     If dateMap.Count = 0 Then
-        Set GenerateTimeline = timelineMap
+        Set GenerateTimeline = dateRowMap
         Exit Function
     End If
 
     Dim sortedDates As Object
     Set sortedDates = CreateObject("System.Collections.ArrayList")
 
-    Dim dateKey As Variant
-    For Each dateKey In dateMap.Keys
-        sortedDates.Add DateValue(dateKey)
-    Next dateKey
+    Dim d As Variant
+    For Each d In dateMap.Keys
+        sortedDates.Add DateValue(d)
+    Next d
     sortedDates.Sort
 
     Dim currentRow As Long
@@ -288,6 +291,9 @@ Private Function GenerateTimeline(ws As Worksheet, dateMap As Object) As Object
             .Interior.Color = RGB(255, 255, 200)
         End With
 
+        dateRowMap(Format(d, "yyyy-mm-dd")) = currentRow
+        currentRow = currentRow + 1
+
         Dim h As Long
         For h = 0 To 23
             Dim startLabel As String
@@ -298,18 +304,15 @@ Private Function GenerateTimeline(ws As Worksheet, dateMap As Object) As Object
             Else
                 endLabel = Format(TimeSerial(h + 1, 0, 0), "hh:mm")
             End If
-
-            ws.Cells(currentRow + h + 1, 1).Value = startLabel & " – " & endLabel
-            timelineMap(Format(d, "yyyy-mm-dd") & "|" & h) = currentRow + h + 1
+            ws.Cells(currentRow, 1).Value = startLabel & " – " & endLabel
+            currentRow = currentRow + 1
         Next h
-
-        currentRow = currentRow + 25
     Next d
 
-    Set GenerateTimeline = timelineMap
+    Set GenerateTimeline = dateRowMap
 End Function
 
-Private Function PlaceRemarksAndFormat(ws As Worksheet, data As Collection, timelineMap As Object) As Long
+Private Function PlaceRemarksAndFormat(ws As Worksheet, data As Collection, dateRowMap As Object) As Long
     Dim remarksWritten As Long
     remarksWritten = 0
 
@@ -318,18 +321,15 @@ Private Function PlaceRemarksAndFormat(ws As Worksheet, data As Collection, time
         Dim dateKey As String
         dateKey = Format(Int(item("NotificationDateTime")), "yyyy-mm-dd")
 
-        Dim hourIndex As Long
-        hourIndex = Hour(item("NotificationDateTime"))
-
-        Dim mapKey As String
-        mapKey = dateKey & "|" & hourIndex
-
-        If Not timelineMap.Exists(mapKey) Then
+        If Not dateRowMap.Exists(dateKey) Then
             GoTo NextItem
         End If
 
+        Dim hourIndex As Long
+        hourIndex = Hour(item("NotificationDateTime"))
+
         Dim targetRow As Long
-        targetRow = timelineMap(mapKey)
+        targetRow = dateRowMap(dateKey) + 1 + hourIndex
 
         Dim targetCell As Range
         Set targetCell = ws.Cells(targetRow, 2)
@@ -337,13 +337,10 @@ Private Function PlaceRemarksAndFormat(ws As Worksheet, data As Collection, time
         Dim remark As String
         remark = BuildRemark(item)
 
-        Dim cellTextBeforeLen As Long
-        cellTextBeforeLen = Len(targetCell.Value)
-
         Dim remarkStart As Long
-        If cellTextBeforeLen > 0 Then
+        If Len(targetCell.Value) > 0 Then
             targetCell.Value = targetCell.Value & vbLf & remark
-            remarkStart = cellTextBeforeLen + 2
+            remarkStart = Len(targetCell.Value) - Len(remark) + 1
         Else
             targetCell.Value = remark
             remarkStart = 1
